@@ -69,6 +69,86 @@ async def test_stale_tool_result_is_fenced_not_delivered():
 
 
 @pytest.mark.asyncio
+async def test_fever_corrected_to_cough_old_result_never_leaks():
+    """
+    Real Sahaay-style correction scenario.
+
+    The worker first says:
+        "I have fever."
+
+    A fever lookup starts.
+
+    The worker then interrupts:
+        "No, I have cough."
+
+    The cough turn becomes the current generation.
+
+    The old fever result must never reach the user, while the
+    cough result must be accepted.
+    """
+
+    guard = GenerationGuard()
+    delivered = []
+
+    async def symptom_lookup(symptom: str, delay: float):
+        await asyncio.sleep(delay)
+        return f"Protocol result for {symptom}"
+
+    fever_gen = guard.new_turn()
+
+    fever_task = guard.run(
+        fever_gen,
+        symptom_lookup("fever", 0.20),
+        label="symptom_lookup:fever",
+        on_result=delivered.append,
+    )
+
+    await asyncio.sleep(0.05)
+
+    cough_gen = guard.new_turn()
+
+    cough_task = guard.run(
+        cough_gen,
+        symptom_lookup("cough", 0.02),
+        label="symptom_lookup:cough",
+        on_result=delivered.append,
+    )
+
+    await asyncio.gather(
+        fever_task,
+        cough_task,
+        return_exceptions=True,
+    )
+
+    assert "Protocol result for fever" not in delivered
+    assert "Protocol result for cough" in delivered
+
+    assert guard.current_generation == cough_gen
+
+    fever_events = [
+        event
+        for event in guard.audit_log
+        if event.generation_id == fever_gen
+    ]
+
+    assert any(
+        event.outcome in {"cancelled", "fenced_stale"}
+        for event in fever_events
+    )
+
+    cough_events = [
+        event
+        for event in guard.audit_log
+        if event.generation_id == cough_gen
+    ]
+
+    assert any(
+        event.outcome == "accepted"
+        for event in cough_events
+    )
+
+
+@pytest.mark.asyncio
 async def test_result_arriving_after_interruption_is_fenced_even_if_not_cancelled():
     """
     Simulates a backend operation that cannot actually be aborted.
@@ -180,6 +260,54 @@ async def test_multiple_in_flight_tools_are_all_cancelled():
 
     assert outcomes.count("cancelled") >= 2
     assert "accepted" in outcomes
+
+
+@pytest.mark.asyncio
+async def test_two_tools_racing_in_same_generation_are_both_accepted():
+    """
+    Two asynchronous tools race within the same generation.
+
+    Both results are valid because neither belongs to a stale generation.
+    """
+
+    guard = GenerationGuard()
+    delivered = []
+
+    async def lookup(delay: float, value: str):
+        await asyncio.sleep(delay)
+        return value
+
+    gen = guard.new_turn()
+
+    task1 = guard.run(
+        gen,
+        lookup(0.02, "tool_a_result"),
+        label="tool_a",
+        on_result=delivered.append,
+    )
+
+    task2 = guard.run(
+        gen,
+        lookup(0.01, "tool_b_result"),
+        label="tool_b",
+        on_result=delivered.append,
+    )
+
+    await asyncio.gather(task1, task2)
+
+    assert "tool_a_result" in delivered
+    assert "tool_b_result" in delivered
+
+    accepted = [
+        event
+        for event in guard.audit_log
+        if event.outcome == "accepted"
+    ]
+
+    assert {event.label for event in accepted} == {
+        "tool_a",
+        "tool_b",
+    }
 
 
 @pytest.mark.asyncio
@@ -409,7 +537,6 @@ async def test_old_generation_started_after_interruption_is_fenced():
 
     old_gen = guard.new_turn()
 
-    # Move to a new generation before starting the old-generation work.
     new_gen = guard.new_turn()
 
     assert new_gen == old_gen + 1
@@ -428,7 +555,6 @@ async def test_old_generation_started_after_interruption_is_fenced():
 
     assert "stale_generation_result" not in delivered
 
-    # The guard must record that the old generation was not accepted.
     outcomes = [
         event.outcome
         for event in guard.audit_log
