@@ -3,35 +3,27 @@ generation_guard.py
 
 The core of Sahaay's "interruption and recovery" claim.
 
-Problem: in a naive voice agent, when a user interrupts and corrects
-themselves, three things can go wrong even if you stop the audio:
-  1. The in-flight LLM/tool call for the OLD request keeps running and its
-     result gets appended to conversation history or spoken later.
-  2. A slow tool call (e.g. a patient-record lookup) started for turn N
-     resolves AFTER turn N+1 has already started, and its result silently
-     leaks into the new turn.
-  3. Conversation state (what the model thinks was said) drifts from what
-     the user actually heard, so future turns reason over a lie.
+Every user turn gets a monotonically increasing generation ID.
+Tool calls and other asynchronous work are stamped with the generation
+that created them. A result is accepted only if its generation is still
+the current generation.
 
-GenerationGuard fixes this with one idea: every user turn gets a
-monotonically increasing generation ID. Every tool call and every TTS
-stream is stamped with the ID that spawned it. Before a result is allowed
-to touch conversation state or be spoken, it must prove its stamp still
-matches the CURRENT generation. If the user has already moved on, the
-result is logged as fenced and dropped — never spoken, never merged into
-history.
+When a new turn begins:
+    - the generation counter advances
+    - running work from the previous generation is cancelled
+    - stale work is never allowed to deliver its result
 
-This module has no dependency on LiveKit or Rime on purpose: it's the
-part of the claim that must be provable in isolation, with a fast
-deterministic test, independent of live audio timing.
+This module is intentionally independent of LiveKit and Rime so that
+the interruption/recovery logic can be tested deterministically with
+asyncio.
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
@@ -40,7 +32,7 @@ logger = logging.getLogger("sahaay.guard")
 
 @dataclass
 class FenceEvent:
-    """One row of the audit log the RIME_EVIDENCE.md test reads back."""
+    """One audit-log entry describing what happened to asynchronous work."""
 
     generation_id: int
     current_generation_at_check: int
@@ -62,19 +54,24 @@ class FenceEvent:
 
 class GenerationGuard:
     """
-    Tracks the "active" conversational turn and fences stale work.
+    Tracks the active conversational generation and fences stale work.
 
-    Usage pattern:
+    Usage:
+
         guard = GenerationGuard()
 
-        # on every new user utterance (including interruptions):
+        # New user utterance / interruption:
         gen = guard.new_turn()
 
-        # when kicking off a tool call or TTS stream for that turn:
-        task = guard.run(gen, my_slow_coroutine(), label="patient_lookup")
+        # Start asynchronous work for that generation:
+        task = guard.run(
+            gen,
+            my_coroutine(),
+            label="patient_lookup",
+            on_result=handle_result,
+        )
 
-        # if the result arrives after the user moved on, it is fenced
-        # and dropped instead of being delivered to on_result.
+    A result is delivered only when its generation is still current.
     """
 
     def __init__(self) -> None:
@@ -84,21 +81,25 @@ class GenerationGuard:
 
     @property
     def current_generation(self) -> int:
+        """Return the generation currently considered active."""
         return self._current_gen
 
     def new_turn(self) -> int:
         """
-        Call this the instant a new user utterance is detected.
+        Start a new conversational generation.
 
-        Bumps the generation counter and cancels every task still running
-        under the previous generation.
+        Any unfinished task belonging to the immediately previous
+        generation is cancelled and recorded in the audit log.
         """
 
         old_gen = self._current_gen
+
         self._current_gen += 1
         new_gen = self._current_gen
 
-        for task in self._active_tasks.get(old_gen, []):
+        old_tasks = self._active_tasks.pop(old_gen, [])
+
+        for task in old_tasks:
             if not task.done():
                 task.cancel()
 
@@ -111,8 +112,6 @@ class GenerationGuard:
                     )
                 )
 
-        self._active_tasks.pop(old_gen, None)
-
         return new_gen
 
     def run(
@@ -123,21 +122,55 @@ class GenerationGuard:
         on_result: Optional[Callable[[Any], None]] = None,
     ) -> asyncio.Task:
         """
-        Schedule coro under generation gen.
+        Run asynchronous work under generation ``gen``.
 
-        If gen is still current when it completes, the result is accepted.
+        If ``gen`` is already stale when this method is called, the work
+        is rejected immediately and recorded as fenced.
 
-        If gen is no longer current, the result is fenced, logged, and
-        dropped instead of being delivered to on_result.
+        If ``gen`` becomes stale while the work is running, cancellation
+        prevents delivery when possible, while the generation check
+        provides a second safety barrier before ``on_result`` is called.
         """
 
-        async def _wrapped():
+        # Protect against accidentally starting work for an already
+        # obsolete generation.
+        if gen != self._current_gen:
+            if hasattr(coro, "close"):
+                coro.close()  # type: ignore[attr-defined]
+
+            self.audit_log.append(
+                FenceEvent(
+                    generation_id=gen,
+                    current_generation_at_check=self._current_gen,
+                    outcome="fenced_stale",
+                    label=label,
+                )
+            )
+
+            logger.info(
+                "Rejected stale work from generation %s "
+                "(current generation is %s): %s",
+                gen,
+                self._current_gen,
+                label,
+            )
+
+            async def _rejected() -> None:
+                return None
+
+            task = asyncio.ensure_future(_rejected())
+            task.sahaay_label = label  # type: ignore[attr-defined]
+            return task
+
+        async def _wrapped() -> Any:
             try:
                 result = await coro
 
             except asyncio.CancelledError:
                 raise
 
+            # Second safety barrier: even if the underlying operation
+            # completed despite cancellation, never deliver a stale result.
             if gen != self._current_gen:
                 self.audit_log.append(
                     FenceEvent(
@@ -149,7 +182,8 @@ class GenerationGuard:
                 )
 
                 logger.info(
-                    "Fenced stale result from turn %s (now on %s): %s",
+                    "Fenced stale result from generation %s "
+                    "(current generation is %s): %s",
                     gen,
                     self._current_gen,
                     label,
@@ -166,16 +200,32 @@ class GenerationGuard:
                 )
             )
 
-            if on_result:
+            if on_result is not None:
                 on_result(result)
 
             return result
 
         task = asyncio.ensure_future(_wrapped())
-
         task.sahaay_label = label  # type: ignore[attr-defined]
 
         self._active_tasks.setdefault(gen, []).append(task)
+
+        # Remove this task from the active-task registry once it finishes.
+        def _cleanup(completed_task: asyncio.Task) -> None:
+            tasks = self._active_tasks.get(gen)
+
+            if tasks is None:
+                return
+
+            try:
+                tasks.remove(completed_task)
+            except ValueError:
+                pass
+
+            if not tasks:
+                self._active_tasks.pop(gen, None)
+
+        task.add_done_callback(_cleanup)
 
         return task
 

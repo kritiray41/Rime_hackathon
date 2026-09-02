@@ -22,17 +22,19 @@ Example:
 - User interrupts
 - Turn 2 → generation 2
 
-Every tool operation started for a turn is associated with that generation.
+Every asynchronous tool operation started for a turn is associated with that generation.
 
 Before a result is delivered, the GenerationGuard checks whether its generation is still current.
 
-If the generation is stale, the result is dropped instead of being delivered.
+If the generation is stale, the result is dropped instead of being delivered to `on_result`.
 
 The guard also records an audit event for:
 
 - `accepted`
 - `cancelled`
 - `fenced_stale`
+
+The guard additionally rejects work that is started using an already-stale generation.
 
 ---
 
@@ -41,4 +43,4 @@ The guard also records an audit event for:
 The repeatable acceptance test is:
 
 ```bash
-python -m pytest test_generation_guard.py -v
+python -m pytest test_generation_guard.py -v -s
