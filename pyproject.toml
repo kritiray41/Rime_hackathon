@@ -1,0 +1,17 @@
+[project]
+name = "sahaay"
+version = "0.1.0"
+description = "Voice-native assistant for rural community health workers"
+requires-python = ">=3.10"
+
+dependencies = [
+    "livekit-agents[openai,rime,silero,turn-detector]~=1.6",
+    "livekit-plugins-noise-cancellation~=0.2",
+    "python-dotenv>=1.1.1"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24"
+]
