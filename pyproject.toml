@@ -5,7 +5,7 @@ description = "Voice-native assistant for rural community health workers"
 requires-python = ">=3.10"
 
 dependencies = [
-    "livekit-agents[openai,rime,silero,turn-detector]~=1.6",
+    "livekit-agents[deepgram,groq,rime,silero,turn-detector]~=1.6",
     "livekit-plugins-noise-cancellation~=0.2",
     "python-dotenv>=1.1.1"
 ]
