@@ -130,7 +130,7 @@ async def entrypoint(ctx: JobContext) -> None:
     session = AgentSession(
         vad=silero.VAD.load(),
         stt=deepgram.STT(),
-        llm=groq.LLM(model="mixtral-8x7b-32768"),
+        llm=groq.LLM(model="openai/gpt-oss-20b"),
         # --- Rime is the primary spoken output for this submission ---
         tts=rime.TTS(
             model="mistv2",          # inline pronunciation control — useful
