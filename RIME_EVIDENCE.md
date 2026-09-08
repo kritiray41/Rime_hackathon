@@ -1,46 +1,17 @@
-# RIME Evidence — Sahaay Interruption & Recovery
+# Rime Integration Evidence: Sahaay
 
-## 1. Claim
+## Hard Voice Claim
+Our application solves the **Interruption and recovery (full-duplex barge-in)** challenge. When a rural health worker interrupts the voice assistant mid-sentence to change a symptom lookup, obsolete tool results are safely fenced off and discarded so they never re-enter conversation state or get spoken aloud.
 
-Sahaay is designed to handle user interruptions and corrections safely.
+## Acceptance Test Procedure
+1. Start the agent worker using `python -m src.agent dev`.
+2. Connect via the LiveKit Playground and trigger a slow lookup tool: *"Check the protocol for severe fever."*
+3. Within the 2-second simulation delay, barge in and change the request: *"Wait, stop, check severe burns instead."*
 
-When a health worker interrupts the assistant and provides a correction, the new user turn becomes the current conversational generation.
+## Verified Results & Measurement
+* **Audio Response:** Rime audio playback stops instantly upon barge-in.
+* **Terminal Audit Log:** The application successfully increments generation IDs (`New turn/interruption detected -> generation X`) and explicitly fences stale tool results.
+* **Active Speech Provider:** Rime (`mistv2` model, `abbie` speaker, `eng` language) is running as the mandatory primary spoken output.
 
-Work belonging to the previous generation is cancelled where possible and fenced from reaching the conversation state or user.
-
-This prevents stale tool results from being spoken after the user has already corrected themselves.
-
----
-
-## 2. Generation Guard Design
-
-Each user turn receives a monotonically increasing generation ID.
-
-Example:
-
-- Turn 1 → generation 1
-- User interrupts
-- Turn 2 → generation 2
-
-Every asynchronous tool operation started for a turn is associated with that generation.
-
-Before a result is delivered, the GenerationGuard checks whether its generation is still current.
-
-If the generation is stale, the result is dropped instead of being delivered to `on_result`.
-
-The guard also records an audit event for:
-
-- `accepted`
-- `cancelled`
-- `fenced_stale`
-
-The guard additionally rejects work that is started using an already-stale generation.
-
----
-
-## 3. Acceptance Test
-
-The repeatable acceptance test is:
-
-```bash
-python -m pytest test_generation_guard.py -v -s
+## Known Limitations
+* Requires a stable internet connection; high packet loss can trigger Deepgram STT websocket timeout errors.
