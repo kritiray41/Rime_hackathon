@@ -2,7 +2,7 @@
 
 Sahaay lets a rural community health worker (ASHA) record and retrieve patient information completely hands-free while attending to patients.
 
-## 🎯 Hard Voice Problem Solved: Interruption & Recovery
+## Hard Voice Problem Solved: Interruption & Recovery
 Voice assistants often fail when a user interrupts them mid-sentence while a backend tool (like a database lookup or protocol search) is running, leading to stale data being spoken aloud. 
 * **Our Solution:** We built a custom `GenerationGuard` module utilizing monotonically increasing generation IDs. When a health worker barges in, obsolete background tasks are instantly fenced off and cancelled, ensuring stale results never re-enter the conversation state.
 
